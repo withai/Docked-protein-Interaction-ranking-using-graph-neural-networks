@@ -1,1 +1,1 @@
-# Protein-Interation-ranking-using-graph-convolution
+# Protein-Protein Interation ranking using graph convolution
