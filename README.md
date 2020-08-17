@@ -1,4 +1,4 @@
-# Protein-Protein Interaction ranking using graph neural networks
+# Assessment of docked protein interaction ranking using graph neural networks
 
 This repository uses Graph Neural Networks (GNN's) such as Graph Convolution Network (GCN) and Graph Attention Network (GAT) to rank the protein-protein complexes in the order of near-nativity to its co-crystalized native complex.
 
