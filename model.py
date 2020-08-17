@@ -1,381 +1,273 @@
+import sys
+import pickle
+import os
+import logging
+import argparse
+
 import torch
+import torch.backends.cudnn as cudnn
 from torch.utils import data
-import torch.optim as optim
 import torch.nn.functional as F
 import torch.nn as nn
 
-import sys
-import os
-from os import listdir
-from os.path import isfile, join
-import re
-import pickle as cp
-import matplotlib.pyplot as plt
-from datetime import datetime
-
 from dataset import Dataset
-from nn import GAT, GCN, bGCN, Dense
+from multi_level_sampler import MultiLevelSampler
+from train_sampler import TrainSampler
+from valid_test_sampler import ValidTestSampler
 
-#torch.multiprocessing.set_sharing_strategy('file_system')
+from train import train
+from test import test
+
 torch.manual_seed(0)
 
 def my_collate(batch):
-    return batch
-
-class GNN(torch.nn.Module):
-    def __init__(self):
-        super(GNN, self).__init__()
-        self.conv1 = bGCN(v_feats=11, filters=16, dropout=0.2)
-        self.conv2 = bGCN(v_feats=16, filters=32, dropout=0.2)
-        self.conv3 = bGCN(v_feats=32, filters=64, dropout=0.2)
-        # self.conv4 = GAT(v_feats=64, filters=128, dropout=0.2)
-        # self.conv5 = GAT(v_feats=128, filters=128, dropout=0.2)
-        self.dense1 = Dense(in_dims=64, out_dims=128, dropout=0.2)
-        self.dense2 = Dense(in_dims=128, out_dims=64, dropout=0.2)
-        self.dense3 = Dense(in_dims=64, out_dims=1, nonlin="linear")
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        # x = self.conv4(x)
-        # x = self.conv5(x)
-        x = x[0]
-        x = torch.sum(x, 0).view(1, -1)
-        x = F.normalize(x)
-        x = self.dense1(x)
-        x = self.dense2(x)
-        x = self.dense3(x)
-        x = torch.squeeze(x, 1)
-
-        return x
-
-def organize_data(complex_set, type="TRAIN"):
-    select_decoys_file = "/s/jawar/m/nobackup/yash/protein-ranking/data/decoys_bm4_zd3.0.2_6deg/pcomplex_select_decoys.pkl"
-    f = open(select_decoys_file, "rb")
-    select_decoys = cp.load(f)
-
-    complexes = []
-    for pcomplex_name in complex_set:
-        if 0 not in select_decoys[pcomplex_name]:
-            print("ERROR: True bound complex not found as part of the decoy.")
-        for i in select_decoys[pcomplex_name]:
-            complexes.append((pcomplex_name, i))
-
-    pcomplex_weights = []
-    pcomplex_categories = []
-    dockq_categories_f = open("/s/jawar/b/nobackup/yash/protein-ranking/data/decoys_bm4_zd3.0.2_6deg/dockq_categories_1000.pkl", "rb")
-    dockq_categories_dict = cp.load(dockq_categories_f)
-
-    dockq_incorrect1_len = len(dockq_categories_dict[type.lower()]["incorrect1"])
-    dockq_incorrect2_len = len(dockq_categories_dict[type.lower()]["incorrect2"])
-    dockq_acceptable1_len = len(dockq_categories_dict[type.lower()]["acceptable1"])
-    dockq_acceptable2_len = len(dockq_categories_dict[type.lower()]["acceptable2"])
-    dockq_medium1_len = len(dockq_categories_dict[type.lower()]["medium1"])
-    dockq_medium2_len = len(dockq_categories_dict[type.lower()]["medium2"])
-    dockq_high_len = len(dockq_categories_dict[type.lower()]["high"])
-
-    dockq_total = dockq_incorrect1_len + dockq_incorrect2_len + dockq_acceptable1_len + dockq_acceptable2_len + dockq_medium1_len + dockq_medium2_len + dockq_high_len
-
-    weight_incorrect1 = dockq_total/dockq_incorrect1_len
-    weight_incorrect2 = dockq_total/dockq_incorrect2_len
-    weight_acceptable1 = dockq_total/dockq_acceptable1_len
-    weight_acceptable2 = dockq_total/dockq_acceptable2_len
-    weight_medium1 = dockq_total/dockq_medium1_len
-    weight_medium2 = dockq_total/dockq_medium2_len
-    weight_high = dockq_total/dockq_high_len
-
-    for complex_ in complexes:
-        try:
-            dockq_categories_dict[type.lower()]["incorrect1"][complex_]
-            pcomplex_weights.append(weight_incorrect1)
-            pcomplex_categories.append(1)
-        except KeyError:
-            pass
-
-        try:
-            dockq_categories_dict[type.lower()]["incorrect2"][complex_]
-            pcomplex_weights.append(weight_incorrect2)
-            pcomplex_categories.append(2)
-        except KeyError:
-            pass
-
-        try:
-            dockq_categories_dict[type.lower()]["acceptable1"][complex_]
-            pcomplex_weights.append(weight_acceptable1)
-            pcomplex_categories.append(3)
-        except KeyError:
-            pass
-
-        try:
-            dockq_categories_dict[type.lower()]["acceptable2"][complex_]
-            pcomplex_weights.append(weight_acceptable2)
-            pcomplex_categories.append(4)
-        except KeyError:
-            pass
-
-        try:
-            dockq_categories_dict[type.lower()]["medium1"][complex_]
-            pcomplex_weights.append(weight_medium1)
-            pcomplex_categories.append(5)
-        except KeyError:
-            pass
-
-        try:
-            dockq_categories_dict[type.lower()]["medium2"][complex_]
-            pcomplex_weights.append(weight_medium2)
-            pcomplex_categories.append(6)
-        except KeyError:
-            pass
-
-        try:
-            dockq_categories_dict[type.lower()]["high"][complex_]
-            pcomplex_weights.append(weight_high)
-            pcomplex_categories.append(7)
-        except KeyError:
-            pass
-
-    return complexes, pcomplex_weights, pcomplex_categories
-
-
-def train(args, model, device, train_loader, optimizer, epoch):
-    model.train()
-
-    for batch_idx, local_batch in enumerate(train_loader):
-        target = []
-        mini_batch_output = []
-
-        # ####################
-        # categories = []
-        # for item in local_batch:
-        #     categories.append((item["category"], item["dockq_score"]))
-        # #print(categories)
-        # ####################
-
-        for item in local_batch:
-            # Move graph to GPU.
-            vertices = item["vertices"].to(device)
-            nh_indices = item["nh_indices"].to(device)
-            int_indices = item["int_indices"].to(device)
-            nh_edges = item["nh_edges"].to(device)
-            int_edges = item["int_edges"].to(device)
-            scores = item["dockq_score"].to(device)
-            target.append(scores)
-
-            model_input = (vertices, nh_indices, int_indices, nh_edges, int_edges)
-            output = model(model_input)
-            mini_batch_output.append(output)
-
-        output = torch.stack(mini_batch_output)
-        target = torch.stack(target).view(-1, 1)
-
-        optimizer.zero_grad()
-
-        loss = F.l1_loss(output, target, reduction='mean')
-        loss.backward()
-        optimizer.step()
-
-        if batch_idx % args["log_interval"] == 0:
-            print('Train Epoch: {} [({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, 100. * batch_idx / len(train_loader), loss.item()))
-
-
-def test(model, device, test_loader):
-    model.eval()
-    test_loss = 0
-    correct = 0
-
-    model_outputs = []
-    decoy_order = []
-    dockq_scores = []
-
-    with torch.no_grad():
-        for batch_idx, local_batch in enumerate(test_loader):
-            target = []
-            mini_batch_output = []
-            for item in local_batch:
-                # Move graph to GPU.
-                prot_name, complex_no = item["name"]
-                vertices = item["vertices"].to(device)
-                nh_indices = item["nh_indices"].to(device)
-                int_indices = item["int_indices"].to(device)
-                nh_edges = item["nh_edges"].to(device)
-                int_edges = item["int_edges"].to(device)
-                scores = item["dockq_score"].to(device)
-                target.append(scores)
-
-                model_input = (vertices, nh_indices, int_indices, nh_edges, int_edges)
-                output = model(model_input)
-
-                model_outputs.append(output.item())
-                decoy_order.append(complex_no)
-                dockq_scores.append(scores.item())
-                # print(output)
-                # print(scores)
-                mini_batch_output.append(output)
-
-            output = torch.stack(mini_batch_output)
-            target = torch.stack(target).view(-1, 1)
-
-            test_loss += F.l1_loss(output, target, reduction='mean').item()
-
-
-    test_loss /= len(test_loader.dataset)
-
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(test_loader.dataset),
-        100. * correct / len(test_loader.dataset)))
-
-    return model_outputs, decoy_order, dockq_scores
-
-
-def find_rank(model, device, type_="VALID"):
-
-    train_valid_test_file = "/s/jawar/b/nobackup/yash/protein-ranking/data/decoys_bm4_zd3.0.2_6deg/train_valid_test.pkl"
-
-    f = open(train_valid_test_file, "rb")
-    train_valid_test_dict = cp.load(f)
-    valid_complexes = train_valid_test_dict[type_.lower()]
-
-    select_decoys_file = "/s/jawar/m/nobackup/yash/protein-ranking/data/decoys_bm4_zd3.0.2_6deg/pcomplex_select_decoys.pkl"
-    f = open(select_decoys_file, "rb")
-    select_decoys = cp.load(f)
-
-    dockq_categories_f = open("/s/jawar/b/nobackup/yash/protein-ranking/data/decoys_bm4_zd3.0.2_6deg/dockq_categories_1000.pkl", "rb")
-    dockq_categories_dict = cp.load(dockq_categories_f)
-
-    all_complexes_perfect_decoys_predicted = 0
-    all_complexes_perfect_decoys_zdock = 0
-    all_complexes_perfect_decoys_dockq = 0
-
-    for pcomplex_name in valid_complexes:
-
-        perfect_decoys_predicted = 0
-        perfect_decoys_zdock = 0
-
-        complexes = []
-
-        dockq_medium2_decoys = [decoy_no for complex_name, decoy_no in dockq_categories_dict[type_.lower()]["medium2"] if complex_name == pcomplex_name]
-        dockq_high_decoys = [decoy_no for complex_name, decoy_no in dockq_categories_dict[type_.lower()]["high"] if complex_name == pcomplex_name]
-
-        rank_limit = len(dockq_medium2_decoys) + len(dockq_high_decoys)
-        print("Rank limit: " + str(rank_limit))
-
-        if(rank_limit == 0):
-            continue
-
-        # Model predictions.
-        for i in select_decoys[pcomplex_name]:
-            complexes.append((pcomplex_name, i))
-
-        params = {'batch_size': 32,
-                  'num_workers': 1,
-                  'collate_fn' : my_collate}
-        validation_set = Dataset(complexes)
-        training_generator = data.DataLoader(validation_set, **params)
-
-        model_outputs, decoy_order, dockq_scores = test(model, device, training_generator)
-
-        # sorting according to dockq
-        dockq_scores, model_outputs, decoy_order = (list(x) for x in zip(*sorted(zip(dockq_scores, model_outputs, decoy_order), key=lambda pair: pair[0], reverse=True)))
-
-        selected_decoy = None
-
-        for i, score in enumerate(dockq_scores):
-            if(score < 0.65):
-                selected_decoy = i-1
-                break
-
-        assert selected_decoy != None
-
-        model_rank = None
-        dockq_scores_, model_outputs_, decoy_order_ = (list(x) for x in zip(*sorted(zip(dockq_scores, model_outputs, decoy_order), key=lambda pair: pair[1], reverse=True)))
-        for i, order in enumerate(decoy_order_):
-            if(order == decoy_order[selected_decoy]):
-                model_rank = i+1
-
-        print(pcomplex_name + "-  DOCKQ score: " + str(dockq_scores[selected_decoy]) + "  ZDOCK Decoy order: " + str(decoy_order[selected_decoy]) + "  Model output: " + str(model_rank))
+    return batch[0]
 
 
 def main():
     # CUDA for PyTorch
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda:0" if use_cuda else "cpu")
-    #cudnn.benchmark = True
+    cudnn.benchmark = True
 
-    # Datasets: Considering all complexes
-    train_valid_test_file = "/s/jawar/b/nobackup/yash/protein-ranking/data/decoys_bm4_zd3.0.2_6deg/train_valid_test.pkl"
+    parser = argparse.ArgumentParser(description='Assessment of docked protein interactions using Graph Neural Networks.')
 
-    f = open(train_valid_test_file, "rb")
-    train_valid_test_dict = cp.load(f)
-    train_complexes = train_valid_test_dict["train"]
-    valid_complexes = train_valid_test_dict["valid"]
-    test_complexes = train_valid_test_dict["test"]
+    parser.add_argument("--train_complexes",
+                        help="Number of train complexes per mini-batch.",
+                        type=int,
+                        default=5)
+    parser.add_argument("--valid_test_complexes",
+                        help="Number of valid and test complexes per mini-batch.",
+                        type=int,
+                        default=30)
+    parser.add_argument("--train_workers",
+                        help="Number of pytorch workers to use for training.",
+                        type=int,
+                        default=0)
+    parser.add_argument("--valid_test_workers",
+                        help="Number of pytorch workers to use for evaluating valid and test sets.",
+                        type=int,
+                        default=0)
+    parser.add_argument("--epoch_start",
+                        help="Epoch number to start from.",
+                        type=int,
+                        default=1)
+    parser.add_argument("--epochs",
+                        help="Total number of epochs.",
+                        type=int,
+                        default=200)
+    parser.add_argument("--mini_batch_per_epoch",
+                        help="Number of mini-batches per epoch.",
+                        type=int,
+                        default=500)
+    parser.add_argument("--valid_test_per_epochs",
+                        help="Evaluate valid and test sets per epochs.",
+                        type=int,
+                        default=1)
+    parser.add_argument("--scores_path",
+                        help="Path to store results of the model from the train, valid, and test sets.",
+                        type=str,
+                        default="/s/jawar/b/nobackup/yash/protein-ranking/experiments/pytorch_scores")
+    parser.add_argument("--load_model",
+                        help="Load pre-trained model.",
+                        type=bool,
+                        default=False)
+    parser.add_argument("--epoch_no",
+                        help="Epoch number to load the pre-trained model from.",
+                        type=int,
+                        default=5)
+    parser.add_argument("--model_path",
+                        help="Path to save and load the trained model.",
+                        type=str,
+                        default="/s/jawar/b/nobackup/yash/protein-ranking/experiments/pytorch_models")
+    parser.add_argument("--GNN_class",
+                        help="GNN class containing the neural network model to train or test.",
+                        type=str,
+                        default="GNN34")
+    parser.add_argument("--only_train",
+                        help="Train or test the model.",
+                        type=bool,
+                        default=True)
+    parser.add_argument("--patience",
+                        help="The number of epochs to wait for early stopping.",
+                        type=int,
+                        default=15)
+    parser.add_argument("--top_n",
+                        help="The top-n complexes used for evaluating the dataset.",
+                        type=int,
+                        default=20)
+    parser.add_argument("--logs_dir",
+                        help="Path to store the logs.",
+                        type=str,
+                        default="/s/jawar/b/nobackup/yash/protein-ranking/experiments/logs")
 
+    args = parser.parse_args()
+
+    ##################### Set parameters #################################
+    train_batch_complexes = args.train_complexes
+    valid_test_batch_complexes = args.valid_test_complexes
+
+    train_workers = args.train_workers
+    valid_test_workers = args.valid_test_workers
+
+    epoch_start = args.epoch_start
+    epochs = args.epochs
+    mini_batches_per_epoch = args.mini_batch_per_epoch
+
+    valid_test_model_per_epochs = args.valid_test_per_epochs
+    scores_path = args.scores_path
+
+    load_model = args.load_model
+    epoch_no = args.epoch_no
+    model_dict_path = args.model_path
+    gnn_class = args.GNN_class
+    only_train = args.only_train
+
+    patience = args.patience
+
+    top_n = args.top_n
+
+    logs_dir = args.logs_dir
+    ############################################################################
+
+    two_graph_class_names = ["DGCN", "DGAT", "EGCN"]
+
+    # Logging.
+    model_log_file = os.path.join(logs_dir, gnn_class+".log")
+    logger = logging.getLogger(gnn_class)
+    logger.setLevel(logging.DEBUG)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+
+    fh = logging.FileHandler(model_log_file)
+    fh.setLevel(logging.DEBUG)
+
+    logger.addHandler(fh)
+
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+    # Import GNN class.
+    module = __import__("gnn")
+    class_name = getattr(module, gnn_class)
+    model = class_name().to(device)
+
+    # Load model.
+    if(load_model):
+        logger.info("Loading model from epoch no: " + str(epoch_no))
+        gnn_class_path = os.path.join(model_dict_path, gnn_class)
+        if(not os.path.exists(gnn_class_path)):
+            os.makedirs(gnn_class_path)
+        # print(torch.load(os.path.join(gnn_class_path, str(epoch_no) + ".pth")))
+        model.load_state_dict(torch.load(os.path.join(gnn_class_path, str(epoch_no) + ".pth")))
+
+    # Model and scores save path.
+    if(only_train):
+        base_model_save_path = os.path.join(model_dict_path, gnn_class)
+
+        if(not os.path.exists(base_model_save_path)):
+            os.makedirs(base_model_save_path)
+        else:
+            os.system("rm -r " + base_model_save_path)
+            os.makedirs(base_model_save_path)
+
+    base_scores_save_path = os.path.join(scores_path, gnn_class)
+    if(not os.path.exists(base_scores_save_path)):
+        os.makedirs(base_scores_save_path)
+    else:
+        os.system("rm -r " + base_scores_save_path)
+        os.makedirs(base_scores_save_path)
+
+    logger.info(model)
+
+    decoys_per_cat = None
+    try:
+        decoys_per_cat = model.decoys_per_cat
+    except AttributeError:
+        decoys_per_cat = 1
 
     # Generators
     # Training.
-    complexes, complex_weights, complex_categories = organize_data(train_complexes, type="TRAIN")
-    params = {'batch_size': 32,
-              'sampler': data.WeightedRandomSampler(complex_weights, len(complex_weights), replacement=True),
-              'num_workers': 1,
+    params = {'sampler': TrainSampler(batch_complexes=train_batch_complexes, decoys_per_cat=decoys_per_cat, dataset_cat = "train"),
+              'num_workers': train_workers,
               'collate_fn' : my_collate}
-    training_set = Dataset(complexes, complex_categories)
+    training_set = Dataset(ranking=model.ranking, multi_label=model.multi_label)
     training_generator = data.DataLoader(training_set, **params)
 
-    # Validation.
-    complexes, complex_weights, complex_categories = organize_data(valid_complexes, type="VALID")
-    params = {'batch_size': 32,
-              'sampler': data.WeightedRandomSampler(complex_weights, len(complex_weights), replacement=True),
-              'num_workers': 1,
+    # Train dataset to test
+    params = {'sampler': ValidTestSampler(batch_complexes=valid_test_batch_complexes, dataset_cat = "train"),
+              'num_workers': valid_test_workers,
               'collate_fn' : my_collate}
-    validation_set = Dataset(complexes, complex_categories)
+    training_test_set = Dataset(ranking=model.ranking, multi_label=model.multi_label)
+    training_test_generator = data.DataLoader(training_test_set, **params)
+
+    # Validation.
+    params = {'sampler': ValidTestSampler(batch_complexes=valid_test_batch_complexes, dataset_cat = "valid"),
+              'num_workers': valid_test_workers,
+              'collate_fn' : my_collate}
+    validation_set = Dataset(ranking=model.ranking, multi_label=model.multi_label)
     validation_generator = data.DataLoader(validation_set, **params)
 
     # Test.
-    # complexes, complex_weights = organize_data(valid_complexes, type="TEST")
-    # params = {'batch_size': 14,
-    #           'sampler': data.WeightedRandomSampler(complex_weights, len(complex_weights), replacement=True),
-    #           'num_workers': 6,
-    #           'collate_fn' : my_collate}
-    # test_set = Dataset(complexes)
-    # test_generator = data.DataLoader(test_set, **params)
+    params = {'sampler': ValidTestSampler(batch_complexes=valid_test_batch_complexes, dataset_cat = "test"),
+              'num_workers': valid_test_workers,
+              'collate_fn' : my_collate}
+    test_set = Dataset(ranking=model.ranking)
+    test_generator = data.DataLoader(test_set, **params)
 
-    model = GNN().to(device)
-    model.load_state_dict(torch.load("/s/jawar/b/nobackup/yash/protein-ranking/experiments/10-27-2019-14:32:35/5.pth")) #Baseline Graph Convolution.
-    #model.load_state_dict(torch.load("/s/jawar/b/nobackup/yash/protein-ranking/experiments/10-24-2019-20:54:53/5.pth"))
-    #model.load_state_dict(torch.load("/s/jawar/b/nobackup/yash/protein-ranking/experiments/10-01-2019-13:25:04/20.pth")) #without regularization Graph convolution
-    #model.load_state_dict(torch.load("/s/jawar/b/nobackup/yash/protein-ranking/experiments/10-09-2019-21:43:11/20.pth")) #with dropout=0.1 regularization Graph convolution
-    #model.load_state_dict(torch.load("/s/jawar/b/nobackup/yash/protein-ranking/experiments/10-13-2019-22:12:54/5.pth")) #with dropout=0.2 regularization Graph convolution
-    #model.load_state_dict(torch.load("/s/jawar/b/nobackup/yash/protein-ranking/experiments/10-26-2019-18:06:47/5.pth")) #Graph attention.
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    if(only_train):
 
-    epochs = 100
+        max_top_n = 0
+        patience_count = 0
 
-    validation_interval = 5
-    model_save_interval = 5
-    evaluation_interval = 10
+        for epoch in range(epoch_start, epochs + 1):
 
-    base_model_save_path = "/s/jawar/b/nobackup/yash/protein-ranking/experiments/"
-    now = datetime.now()
-    base_model_save_path += now.strftime("%m-%d-%Y-%H:%M:%S")
-    os.makedirs(base_model_save_path)
+            train(model, device, training_generator, model.optimizer, epoch, mini_batches_per_epoch, two_graph_class_names, logger)
 
-    train_args = {"log_interval": 20}
-    epoch_start = 1
-    curr_epoch = epoch_start
+            if epoch % valid_test_model_per_epochs == 0:
+                train_scores, train_top_n_near_native, train_top_n_native, train_enrichment_near_native = test(model, device, training_test_generator, epoch, two_graph_class_names, top_n=top_n, dataset_cat = "TRAIN")
+                logger.info("Train top " + str(top_n) + ": " + str(train_top_n_near_native) + " " + str(train_top_n_native) + " " + str(train_enrichment_near_native))
 
-    for epoch in range(epoch_start, epochs + 1):
-        curr_epoch = epoch
-        train(train_args, model, device, training_generator, optimizer, epoch)
-        if(epoch % validation_interval == 0):
-            test(model, device, validation_generator)
-        if(epoch % evaluation_interval == 0):
-            find_rank(model, device, type_="VALID")
-        if(epoch % model_save_interval == 0):
-            model_save_path = base_model_save_path + "/" + str(epoch) + ".pth"
-            torch.save(model.state_dict(), model_save_path)
+                valid_scores, valid_top_n_near_native, valid_top_n_native, valid_enrichment_near_native = test(model, device, validation_generator, epoch, two_graph_class_names, top_n=top_n, dataset_cat = "VALID")
+                logger.info("Validation top " + str(top_n) + ": " + str(valid_top_n_near_native) + " " + str(valid_top_n_native) + " " + str(valid_enrichment_near_native))
+
+                test_scores, test_top_n_near_native, test_top_n_native, test_enrichment_near_native = test(model, device, test_generator, epoch_no, two_graph_class_names, top_n=top_n, dataset_cat = "TEST")
+                logger.info("Test top " + str(top_n) + ": " + str(test_top_n_near_native) + " " + str(test_top_n_native) + " " + str(test_enrichment_near_native))
+
+                if(valid_enrichment_near_native >= max_top_n):
+                    max_top_n = valid_enrichment_near_native
+                    patience_count = 0
+
+                    model_save_path = base_model_save_path + "/" + str(epoch) + ".pth"
+                    torch.save(model.state_dict(), model_save_path)
+
+                    scores = {"train": train_scores, "valid": valid_scores, "test": test_scores}
+                    model_save_path = base_scores_save_path + "/" + str(epoch) + ".pkl"
+                    with open(model_save_path, "wb") as f:
+                        pickle.dump(scores, f)
+                else:
+                    patience_count += 1
+
+                if(patience_count > patience):
+                    logger.info("Early stopped epoch no: " + str(epoch))
+                    break
+        logger.info("Training stopped epoch no:" + str(epoch))
+        logger.info("Best near-native score:" + str(max_top_n))
+
+    else:
+
+        valid_scores, valid_top_n_near_native, valid_top_n_native, valid_enrichment_near_native  = test(model, device, validation_generator, epoch_no, two_graph_class_names, top_n=top_n, dataset_cat = "VALID")
+        logger.info("Validation top " + str(top_n) + ": " + str(valid_top_n_near_native) + " " + str(valid_top_n_native) + " " + str(valid_enrichment_near_native))
+
+        test_scores, test_top_n_near_native, test_top_n_native, test_enrichment_near_native = test(model, device, test_generator, epoch_no, two_graph_class_names, top_n=top_n, dataset_cat = "TEST")
+        logger.info("Test top " + str(top_n) + ": " + str(test_top_n_near_native) + " " + str(test_top_n_native) + " " + str(test_enrichment_near_native))
+
+        scores = {"valid": valid_scores, "test": test_scores}
+        model_save_path = base_scores_save_path + "/" + str(epoch_no) + ".pkl"
+        with open(model_save_path, "wb") as f:
+            pickle.dump(scores, f)
 
 if __name__ == "__main__":
     main()
