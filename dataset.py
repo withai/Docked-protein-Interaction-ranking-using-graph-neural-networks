@@ -7,16 +7,17 @@ import pickle
 import random
 
 class customDataset(data.Dataset):
-    def __init__(self, multi_label=False):
+    def __init__(self, multi_label=False, dataset_dir=""):
         self.device = torch.device("cuda")
         self.multi_label = multi_label
+        self.dataset_dir = dataset_dir
 
     def __len__(self):
         'Denotes the total number of samples'
         return len(self.complexes)
 
     def _get_input_feature_file_name(self, pcomplex_pick_name, decoy_name_pick):
-        docking_sw_directory = "/s/jawar/b/nobackup/yash/protein-ranking/data/Score_set"
+        docking_sw_directory = dataset_dir
         directory = os.path.join(docking_sw_directory, "features", "input_features_dict", pcomplex_pick_name)
         return os.path.join(directory, decoy_name_pick + ".pkl")
 

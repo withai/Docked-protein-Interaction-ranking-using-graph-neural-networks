@@ -6,9 +6,9 @@ from torch.utils.data import Sampler
 
 class customSampler(Sampler):
 
-    def __init__(self, batch_complexes):
+    def __init__(self, batch_complexes, dataset_dir):
         self.batch_complexes = batch_complexes
-        self.dataset_dir = "/s/jawar/b/nobackup/yash/protein-ranking/data/Score_set/decoys"
+        self.dataset_dir = dataset_dir
         self.pcomplex_names = os.listdir(self.dataset_dir)
         self.pcomplex_len = len(self.pcomplex_names)
 
