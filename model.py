@@ -41,14 +41,10 @@ def main():
                         help="Evaluate valid and test sets per epochs.",
                         type=int,
                         default=1)
-    parser.add_argument("--scores_path",
-                        help="Path to store results of the model from the train, valid, and test sets.",
-                        type=str,
-                        default="/s/jawar/b/nobackup/yash/protein-ranking/experiments/pytorch_scores")
     parser.add_argument("--dataset_path",
                         help="Path to store results of the model from the train, valid, and test sets.",
                         type=str,
-                        default="/s/jawar/b/nobackup/yash/protein-ranking/experiments/pytorch_scores")
+                        default="")
     parser.add_argument("--epoch_no",
                         help="Epoch number to load the pre-trained model from.",
                         type=int,
@@ -56,27 +52,19 @@ def main():
     parser.add_argument("--model_path",
                         help="Path to save and load the trained model.",
                         type=str,
-                        default="/s/jawar/b/nobackup/yash/protein-ranking/experiments/pytorch_models")
+                        default="")
     parser.add_argument("--GNN_class",
                         help="GNN class containing the neural network model to train or test.",
                         type=str,
                         default="GNN34")
-    parser.add_argument("--only_train",
-                        help="Train or test the model.",
-                        type=bool,
-                        default=True)
-    parser.add_argument("--patience",
-                        help="The number of epochs to wait for early stopping.",
-                        type=int,
-                        default=15)
     parser.add_argument("--top_n",
                         help="The top-n complexes used for evaluating the dataset.",
                         type=int,
                         default=20)
-    parser.add_argument("--logs_dir",
-                        help="Path to store the logs.",
+    parser.add_argument("--dataset_dir",
+                        help="Path to dataset",
                         type=str,
-                        default="/s/jawar/b/nobackup/yash/protein-ranking/experiments/logs")
+                        default="")
 
     args = parser.parse_args()
 
@@ -86,7 +74,6 @@ def main():
     valid_test_workers = args.valid_test_workers
 
     valid_test_model_per_epochs = args.valid_test_per_epochs
-    scores_path = args.scores_path
 
     load_model = args.load_model
     epoch_no = args.epoch_no
@@ -94,6 +81,8 @@ def main():
     gnn_class = args.GNN_class
 
     top_n = args.top_n
+
+    dataset_dir = args.dataset_dir
     ############################################################################
 
     two_graph_class_names = ["DGCN", "DGAT", "EGCN"]
@@ -116,14 +105,14 @@ def main():
     # Generators
 
     # Test.
-    params = {'sampler': customSampler(batch_complexes=valid_test_batch_complexes),
+    params = {'sampler': customSampler(batch_complexes=valid_test_batch_complexes, dataset_dir=dataset_dir),
               'num_workers': valid_test_workers,
               'collate_fn' : my_collate}
-    test_set = customDataset(multi_label=model.multi_label)
+    test_set = customDataset(multi_label=model.multi_label, dataset_dir=dataset_dir)
     test_generator = data.DataLoader(test_set, **params)
 
-    test_scores, test_top_n_near_native, test_top_n_native, test_enrichment_near_native  = test(model, device, test_generator, epoch_no, two_graph_class_names, top_n=top_n, dataset_cat = "CUSTOM")
-    print("Test top " + str(top_n) + ": " + str(test_top_n_near_native) + " " + str(test_top_n_native) + " " + str(test_enrichment_near_native))
+    test_scores = test(model, device, test_generator, epoch_no, two_graph_class_names, top_n=top_n, dataset_cat = "CUSTOM")
+    print("Scores : " + test_scores)
 
 
 
